@@ -1,0 +1,160 @@
+from fastapi import APIRouter, Depends, HTTPException
+from models.user import Users
+from models.email import EmailCode
+from dependencies.dependencies import open_session, verify_token
+from main import bcrypt_context
+from import_env import ALGORITHM, ACCESS_TOKEN_MINUTES, SECRET_KEY
+from schemas.schemas import UsersSchema, LoginSchema, RecoverPasswordRequest, VerifyCodeRequest, ResetPasswordRequest
+from sqlalchemy.orm import Session
+from jose import jwt
+from datetime import datetime, timedelta, timezone
+from fastapi.security import OAuth2PasswordRequestForm
+from scripts.password_recovery import start_password_recovery
+
+auth_roter = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def get_user_by_email(session: Session, email: str):
+    return session.query(Users).filter(Users.email == email).first()
+
+
+def hash_password(password: str) -> str:
+    return bcrypt_context.hash(password)
+
+def auth_user(email, password, session):
+    user = session.query(Users).filter(Users.email==email).first()
+    if not user:
+        return False
+    elif not bcrypt_context.verify(password, user.senha):
+        return False
+    return user
+
+def create_token(id_user, duration_token=timedelta(minutes=ACCESS_TOKEN_MINUTES)):
+    date_exp = datetime.now(timezone.utc) + duration_token
+    dic = {"sub": str(id_user), "exp": date_exp}
+    jwt_code = jwt.encode(dic, SECRET_KEY, ALGORITHM)
+    return jwt_code
+@auth_roter.get("/")
+async def home():
+    return {
+        "message": "Welcome to my Auth Service API"
+    }
+    
+@auth_roter.post("/register", status_code=201)
+async def create_user_register(user_schema: UsersSchema, session: Session = Depends(open_session)):
+    user = session.query(Users).filter(Users.email==user_schema.email).first()
+    if user:
+        raise HTTPException(status_code=400, detail="Existing user.")
+    password_security = hash_password(user_schema.senha)
+    new_user = Users(user_schema.email, password_security, user_schema.name)
+    session.add(new_user)
+    
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise HTTPException(status_code=500, detail="Error creating user.")
+    
+    return {
+        "message": f"User {user_schema.email} successfully registered."
+    }
+@auth_roter.post("/login")
+async def login_user_auth(user_schema: LoginSchema, session: Session = Depends(open_session)):
+    user = auth_user(user_schema.email, user_schema.senha, session)
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid username or password.")
+    else:
+        access_token = create_token(user.id)
+        refresh_token = create_token(user.id, duration_token=timedelta(days=7))
+        return {"access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_type": "Bearer"
+        }
+        
+@auth_roter.post("/login-form")
+async def login_user_auth(dados_form : OAuth2PasswordRequestForm = Depends(), session: Session = Depends(open_session)):
+    user = auth_user(dados_form.username, dados_form.password, session)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    else:
+        access_token = create_token(user.id)
+        return {"access_token": access_token,
+                "token_type": "Bearer"
+                }
+ 
+@auth_roter.get("/refresh")
+async def refresh_roter_auth(user: Session = Depends(verify_token)):
+    access_token = create_token(user.id)
+    return {"access_token": access_token,
+            "token_type": "Bearer"
+        }
+    
+@auth_roter.post("/recover-password")
+async def recover_pass(payload: RecoverPasswordRequest, session: Session = Depends(open_session)):
+    user = get_user_by_email(session, payload.email)
+
+    if user:
+        start_password_recovery(session, payload.email)
+
+    return {
+        "message": "If the email exists, a recovery code was sent."
+    }
+    
+
+@auth_roter.post("/verify-recovery-code")
+async def verify_recovery_code(
+    payload: VerifyCodeRequest,
+    session: Session = Depends(open_session)
+):
+    record = session.query(EmailCode)\
+        .filter(EmailCode.email == payload.email)\
+        .first()
+
+    if not record:
+        raise HTTPException(400, "Invalid or expired code")
+
+    if datetime.now() > record.expires_at:
+        session.delete(record)
+        session.commit()
+        raise HTTPException(400, "Invalid or expired code")
+
+    if record.code != payload.code:
+        raise HTTPException(400, "Invalid or expired code")
+
+    return {
+        "message": "Code validated successfully"
+    }
+    
+@auth_roter.post("/reset-password")
+async def reset_password(
+    payload: ResetPasswordRequest,
+    session: Session = Depends(open_session)
+):
+    record = session.query(EmailCode)\
+        .filter(EmailCode.email == payload.email)\
+        .first()
+
+    if not record:
+        raise HTTPException(400, "Invalid or expired code")
+
+    if datetime.now() > record.expires_at:
+        session.delete(record)
+        session.commit()
+        raise HTTPException(400, "Invalid or expired code")
+
+    if record.code != payload.code:
+        raise HTTPException(400, "Invalid or expired code")
+
+    user = get_user_by_email(session, payload.email)
+
+    if not user:
+        raise HTTPException(400, "Invalid or expired code")
+
+    user.password = hash_password(payload.new_password)
+
+    session.delete(record)
+    session.commit()
+
+    return {
+        "message": "Password reset successfully"
+    }
