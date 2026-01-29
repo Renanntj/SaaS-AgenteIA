@@ -1,9 +1,8 @@
 from sqlalchemy import Column, String, Integer, DateTime
-from sqlalchemy.orm import declarative_base
+from .base import Base
 from sqlalchemy import Column, String, DateTime
 
 
-Base = declarative_base()
 
 class EmailCode(Base):
     __tablename__ = "email_codes"

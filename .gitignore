@@ -80,4 +80,5 @@ htmlcov/
 # =========================
 build/
 dist/
+comand.txt
 
